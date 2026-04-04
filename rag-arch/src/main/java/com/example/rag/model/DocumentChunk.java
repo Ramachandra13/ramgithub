@@ -19,8 +19,8 @@ public class DocumentChunk {
     private int chunkTotal;
 
     private String section;
-    private int startPage;
-    private int endPage;
+    private Integer startPage;
+    private Integer endPage;
     private String sectionPath;
     private Map<String, Object> metadata = new HashMap<>();
 
@@ -81,11 +81,11 @@ public class DocumentChunk {
         this.chunkTotal = chunkTotal;
     }
 
-    public int getStartPage() {
+    public Integer getStartPage() {
         return startPage;
     }
 
-    public void setStartPage(int startPage) {
+    public void setStartPage(Integer startPage) {
         this.startPage = startPage;
     }
 
@@ -93,7 +93,7 @@ public class DocumentChunk {
         return endPage;
     }
 
-    public void setEndPage(int endPage) {
+    public void setEndPage(Integer endPage) {
         this.endPage = endPage;
     }
 

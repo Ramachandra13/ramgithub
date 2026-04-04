@@ -1,204 +1,144 @@
 package com.example.rag.service;
 
 import java.io.IOException;
-
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.UUID;
-import java.util.stream.Collectors;
-
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import com.example.rag.model.DocumentChecksumUtil;
+import com.example.rag.extractor.ExtractionStrategy;
 import com.example.rag.model.DocumentChunk;
-import com.example.rag.model.PageText;
+import com.example.rag.model.DocumentChecksumUtil;
 import com.example.rag.vector.VectorStoreClient;
-
 
 @Service
 public class RagIndexingService {
 
-    private static final Logger log = LoggerFactory.getLogger(RagIndexingService.class);
+    private static final Logger log =
+            LoggerFactory.getLogger(RagIndexingService.class);
 
+    private final AtomicBoolean indexing = new AtomicBoolean(false);
 
     private final RagDataLoader loader;
-    private final PdfDocumentExtractor extractor;
-    private final TextChunker chunker;
+    private final DocumentExtractor documentExtractor;
     private final EmbeddingClient embeddingClient;
     private final VectorStoreClient vectorStore;
-
     private final QdrantMetadataService metadataService;
     private final DocumentChecksumUtil checksumUtil;
+    private final ExtractionStrategy extractionStrategy;
 
     public RagIndexingService(
             RagDataLoader loader,
-            PdfDocumentExtractor extractor,
-            TextChunker chunker,
+            DocumentExtractor documentExtractor,
             EmbeddingClient embeddingClient,
             VectorStoreClient vectorStore,
             QdrantMetadataService metadataService,
-            DocumentChecksumUtil checksumUtil
+            DocumentChecksumUtil checksumUtil,
+            ExtractionStrategy extractionStrategy
     ) {
         this.loader = loader;
-        this.extractor = extractor;
-        this.chunker = chunker;
+        this.documentExtractor = documentExtractor;
         this.embeddingClient = embeddingClient;
         this.vectorStore = vectorStore;
         this.metadataService = metadataService;
         this.checksumUtil = checksumUtil;
-
+        this.extractionStrategy = extractionStrategy;
     }
 
-//    @PostConstruct
+    /**
+     * Entry point for full indexing.
+     */
     public void indexDocuments(String filesPath) throws IOException {
 
-//       String filesPath = "D://From-C-Drive//Weekly-Architecture-India-Tasks-Status//Tech-Task//RAG-Architecture//Data-For-POC//rag-arch//src//main//resources//rag-data//kubernetes//";
 
-        log.info("Starting document indexing");
-
-        List<Path> pdfs = loader.loadDocuments(filesPath);
-
-        int total = pdfs.size();
-        int processed = 0;
-
-
-        List<DocumentChunk> allChunks = new ArrayList<>();
-
-        // after chunking
-        log.info("Number of chunks created: {}", allChunks.size());
-
-        for (Path pdf : pdfs) {
-
-            processed++;
-            indexSingleDocument(pdf, processed, total);
-
-
-            String fileName = pdf.getFileName().toString();
-            String documentId = UUID.randomUUID().toString();
-
-            log.info("Processing document: {}", fileName);
-
-            // 1. Extract page-level text
-            List<PageText> pages = extractor.extractPages(pdf);
-
-            if (pages.isEmpty()) {
-                log.warn("No text extracted from {}", pdf.getFileName());
-                continue;
-            }
-
-            // 2. Combine pages into a single string
-            String fullText = pages.stream()
-                    .map(PageText::getText)
-                    .collect(Collectors.joining("\n"));
-
-
-            // 3. Chunk text → DocumentChunks
-                List<DocumentChunk> chunks = chunker.chunk(
-                        documentId,
-                        fileName,
-                        fullText,
-                        1000,   // chunk size
-                        150     // overlap
-                );
-
-
-
-            // 4. Generate embeddings
-                for (DocumentChunk chunk : chunks) {
-                    float[] embedding =
-                            embeddingClient.embed(chunk.generateEmbeddingText());
-
-                        chunk.setEmbedding(embedding);
-                    }
-
-            allChunks.addAll(chunks);
-
+        if (!indexing.compareAndSet(false, true)) {
+            log.warn("Indexing already running, skipping");
+            return;
         }
 
-        // after embeddings
-        log.info("Total chunks created: {}", allChunks.size());
+        try {
+            log.info("Starting document indexing from {}", filesPath);
 
-        vectorStore.upsert(allChunks);
+            List<Path> documents = loader.loadDocuments(filesPath);
+            int total = documents.size();
 
-        log.info("Document indexing completed successfully");
+            for (int i = 0; i < total; i++) {
+                indexSingleDocument(documents.get(i), i + 1, total);
+            }
+
+            log.info("Document indexing completed successfully");
+
+        } finally {
+            indexing.set(false);
+        }
 
     }
 
+    /**
+     * Index exactly one document (idempotent).
+     */
     private void indexSingleDocument(
-            Path pdf,
+            Path filePath,
             int current,
             int total
     ) {
-        String fileName = pdf.getFileName().toString();
-        String documentId = fileName; // ✅ stable ID
 
-        log.info("[{}/{}] Processing {}", current, total, fileName);
+        String documentId = filePath.getFileName().toString();
+        log.info("[{}/{}] Processing {}", current, total, documentId);
 
         try {
-            byte[] bytes = Files.readAllBytes(pdf);
+            byte[] bytes = Files.readAllBytes(filePath);
             String checksum = checksumUtil.sha256(bytes);
 
             Optional<String> existing =
-                    Optional.ofNullable(
-                            metadataService.fetchChecksum(documentId)
-                    ).orElse(Optional.empty());
+                    metadataService.fetchChecksum(documentId);
 
-
-            if (existing.isPresent()
-                    && existing.get().equals(checksum)) {
-
-                log.info("Skipping unchanged document: {}", fileName);
+            if (existing.isPresent() && existing.get().equals(checksum)) {
+                log.info("Skipping unchanged document {}", documentId);
                 return;
             }
 
             if (existing.isPresent()) {
-                log.info("Checksum changed, deleting old vectors: {}", fileName);
+                log.info("Checksum changed, deleting old vectors for {}",
+                        documentId);
                 metadataService.deleteDocumentVectors(documentId);
             }
 
-            List<PageText> pages = extractor.extractPages(pdf);
+            // ✅ Chunking + metadata handled ONLY here
+            List<DocumentChunk> chunks =
+                    documentExtractor.processDocument(
+                            filePath,
+                            extractionStrategy,
+                            documentId,
+                            checksum
+                    );
 
-            if (pages.isEmpty()) {
-                log.warn("No text extracted from {}", fileName);
+            if (chunks.isEmpty()) {
+                log.warn("No chunks produced for {}", documentId);
                 return;
             }
 
-            String fullText = pages.stream()
-                    .map(PageText::getText)
-                    .collect(Collectors.joining("\n"));
-
-            List<DocumentChunk> chunks = chunker.chunk(
-                    documentId,
-                    fileName,
-                    fullText,
-                    1000,
-                    150
-            );
-
+            // ✅ Embeddings
             for (DocumentChunk chunk : chunks) {
-
-                chunk.getMetadata().put("checksum", checksum);
-                chunk.getMetadata().put("document_id", documentId);
-
                 chunk.setEmbedding(
-                        embeddingClient.embed(chunk.generateEmbeddingText())
+                        embeddingClient.embed(
+                                chunk.generateEmbeddingText()
+                        )
                 );
             }
 
             vectorStore.upsert(chunks);
 
-            log.info("Indexed document {} ({} chunks)",
-                    fileName, chunks.size());
+            log.info("Indexed {} ({} chunks)",
+                    documentId, chunks.size());
 
         } catch (Exception ex) {
-            log.error("Failed processing {}", fileName, ex);
+            log.error("Failed processing {}", documentId, ex);
         }
     }
 }
-

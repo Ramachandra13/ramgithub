@@ -1,7 +1,7 @@
 package com.example.rag.service;
 
 import com.example.rag.config.EmbeddingProperties;
-import com.example.rag.extractor;
+import com.example.rag.extractor.ExtractionStrategy;
 import com.example.rag.model.DocumentChunk;
 import com.example.rag.model.DocumentSection;
 import com.example.rag.model.PageText;
@@ -15,13 +15,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.*;
-import java.util.stream.Collectors;
 
 @Service
 public class DocumentExtractor {
 
     private final int maxChunkTokens;
-
     private final int chunkOverlapTokens;
     private final ITokenizer tokenizer;
 
@@ -36,108 +34,108 @@ public class DocumentExtractor {
             throw new IllegalArgumentException("Max chunk tokens must be greater than 0");
         }
         if (chunkOverlapTokens < 0 || chunkOverlapTokens >= maxChunkTokens) {
-            throw new IllegalArgumentException("Chunk overlap tokens must be between 0 and max chunk tokens");
+            throw new IllegalArgumentException(
+                    "Chunk overlap tokens must be between 0 and max chunk tokens");
         }
     }
 
+    /* ===================== ENTRY POINT ===================== */
+
     public List<DocumentChunk> processDocument(
             Path filePath,
-            extractor.ExtractionStrategy extractionStrategy,
+            ExtractionStrategy extractionStrategy,
             String documentId,
             String checksum
     ) {
 
         if (!Files.exists(filePath)) {
-            throw new RuntimeException("PDF file not found: " + filePath);
+            throw new RuntimeException("File not found: " + filePath);
         }
 
         try (InputStream stream = new FileInputStream(filePath.toFile())) {
-            List<DocumentSection> sections = extractionStrategy.extract(stream);
+            List<DocumentSection> sections =
+                    extractionStrategy.extract(stream);
             return createChunksFromSections(sections, documentId, checksum);
         } catch (Exception e) {
             throw new RuntimeException("Failed to process document: " + filePath, e);
         }
     }
 
+    /* ===================== SECTION → CHUNKS ===================== */
+
     private List<DocumentChunk> createChunksFromSections(
             List<DocumentSection> sections,
             String documentId,
             String checksum
     ) {
-        List<DocumentChunk> chunks = new ArrayList<>();
 
-        int globalIndex = 0;
-
-//        for (DocumentSection section : sections) {
-//            chunks.addAll(createChunksFromSection(section, documentId, checksum));
-//        }
+        List<TempChunk> tempChunks = new ArrayList<>();
 
         for (DocumentSection section : sections) {
-            List<DocumentChunk> sectionChunks =
-                    createChunksFromSection(section, documentId, checksum);
-
-            for (DocumentChunk chunk : sectionChunks) {
-                chunk.setChunkIndex(globalIndex++);
-                chunks.add(chunk);
-            }
+            tempChunks.addAll(createTempChunksFromSection(section));
         }
 
-        // Now we know total
-        int total = chunks.size();
-        for (DocumentChunk chunk : chunks) {
-            chunk.setChunkTotal(total);
-            chunk.getMetadata().put("chunk_total", total);
+        int totalChunks = tempChunks.size();
+        List<DocumentChunk> result = new ArrayList<>(totalChunks);
+
+        for (int i = 0; i < totalChunks; i++) {
+            TempChunk tc = tempChunks.get(i);
+            result.add(
+                    createChunk(
+                            tc.text,
+                            tc.section,
+                            tc.pages,
+                            documentId,
+                            checksum,
+                            i,
+                            totalChunks
+                    )
+            );
         }
 
-        return chunks;
+        return result;
     }
 
-    private List<DocumentChunk> createChunksFromSection(
-            DocumentSection section,
-            String documentId,
-            String checksum
+    /* ===================== SECTION SPLITTING ===================== */
+
+    private List<TempChunk> createTempChunksFromSection(
+            DocumentSection section
     ) {
 
-        if (section.getPageTexts().isEmpty() || section.getText().isBlank()) {
+        if (section.getPageTexts().isEmpty()
+                || section.getText().isBlank()) {
             return List.of();
         }
 
-        int tokenCount = tokenizer.countTokens(section.getText());
+        int tokenCount =
+                tokenizer.countTokens(section.getText());
+
         if (tokenCount <= maxChunkTokens) {
-            List<Integer> pages = section.getPageTexts()
-                    .stream()
-                    .map(PageText::getPageNumber)
-                    .toList();
+            List<Integer> pages =
+                    section.getPageTexts()
+                            .stream()
+                            .map(PageText::getPageNumber)
+                            .toList();
 
-            return List.of(createChunk(
-                    section.getText(),
-                    section,
-                    pages,
-                    documentId,
-                    checksum
-            ));
+            return List.of(
+                    new TempChunk(
+                            section.getText(),
+                            section,
+                            pages
+                    )
+            );
         }
 
-        List<ChunkWithPages> subChunks = splitLargeSection(section);
-        List<DocumentChunk> results = new ArrayList<>();
-
-        for (int i = 0; i < subChunks.size(); i++) {
-            ChunkWithPages sc = subChunks.get(i);
-            results.add(createChunk(
-                    sc.text(),
-                    section,
-                    sc.pages(),
-                    documentId,
-                    checksum
-            ));
-        }
-
-        return results;
+        return splitLargeSection(section);
     }
 
-    private List<ChunkWithPages> splitLargeSection(DocumentSection section) {
+    /* ===================== TOKEN-AWARE SPLIT ===================== */
 
-        List<ChunkWithPages> result = new ArrayList<>();
+    private List<TempChunk> splitLargeSection(
+            DocumentSection section
+    ) {
+
+        List<TempChunk> result = new ArrayList<>();
         StringBuilder buffer = new StringBuilder();
         Set<Integer> pages = new HashSet<>();
         int tokenCount = 0;
@@ -149,14 +147,16 @@ public class DocumentExtractor {
             while (index < content.length()) {
 
                 int available = maxChunkTokens - tokenCount;
+
                 if (available <= 0) {
-                    flushChunk(result, buffer, pages);
-                    tokenCount = applyOverlap(buffer, pages);
+                    flushChunk(result, buffer, pages, section);
+                    tokenCount = applyOverlap(buffer);
                     continue;
                 }
 
                 String remaining = content.substring(index);
-                int remainingTokens = tokenizer.countTokens(remaining);
+                int remainingTokens =
+                        tokenizer.countTokens(remaining);
 
                 if (remainingTokens <= available) {
                     buffer.append(" ").append(remaining);
@@ -165,53 +165,69 @@ public class DocumentExtractor {
                     break;
                 }
 
-                String fitted = getTextWithinTokenLimit(remaining, available);
+                String fitted =
+                        getTextWithinTokenLimit(
+                                remaining,
+                                available
+                        );
+
                 buffer.append(" ").append(fitted);
                 pages.add(page.getPageNumber());
 
-                flushChunk(result, buffer, pages);
-                tokenCount = applyOverlap(buffer, pages);
+                flushChunk(result, buffer, pages, section);
+                tokenCount = applyOverlap(buffer);
 
                 index += fitted.length();
             }
         }
 
         if (!buffer.isEmpty()) {
-            flushChunk(result, buffer, pages);
+            flushChunk(result, buffer, pages, section);
         }
 
         return result;
     }
 
     private void flushChunk(
-            List<ChunkWithPages> result,
+            List<TempChunk> result,
             StringBuilder buffer,
-            Set<Integer> pages
+            Set<Integer> pages,
+            DocumentSection section
     ) {
-        result.add(new ChunkWithPages(
-                buffer.toString().trim(),
-                pages.stream().sorted().toList()
-        ));
+        result.add(
+                new TempChunk(
+                        buffer.toString().trim(),
+                        section,
+                        pages.stream().sorted().toList()
+                )
+        );
         buffer.setLength(0);
         pages.clear();
     }
 
-    private int applyOverlap(StringBuilder buffer, Set<Integer> pages) {
+    /* ===================== HELPERS ===================== */
+
+    private int applyOverlap(StringBuilder buffer) {
         if (chunkOverlapTokens <= 0) return 0;
 
         String overlap = getOverlapText(buffer.toString());
         buffer.setLength(0);
         buffer.append(overlap);
+
         return tokenizer.countTokens(overlap);
     }
 
-    private String getTextWithinTokenLimit(String text, int maxTokens) {
+    private String getTextWithinTokenLimit(
+            String text,
+            int maxTokens
+    ) {
 
         int low = 0, high = text.length(), best = 0;
 
         while (low <= high) {
             int mid = (low + high) / 2;
-            if (tokenizer.countTokens(text.substring(0, mid)) <= maxTokens) {
+            if (tokenizer.countTokens(
+                    text.substring(0, mid)) <= maxTokens) {
                 best = mid;
                 low = mid + 1;
             } else {
@@ -220,8 +236,11 @@ public class DocumentExtractor {
         }
 
         String candidate = text.substring(0, best);
+
         for (int i = candidate.length() - 1; i >= 0; i--) {
-            if (Arrays.binarySearch(SENTENCE_ENDINGS, candidate.charAt(i)) >= 0) {
+            if (Arrays.binarySearch(
+                    SENTENCE_ENDINGS,
+                    candidate.charAt(i)) >= 0) {
                 return candidate.substring(0, i + 1);
             }
         }
@@ -234,7 +253,8 @@ public class DocumentExtractor {
 
         int start = text.length();
         for (int i = 0; i < text.length(); i++) {
-            if (tokenizer.countTokens(text.substring(i)) <= chunkOverlapTokens) {
+            if (tokenizer.countTokens(
+                    text.substring(i)) <= chunkOverlapTokens) {
                 start = i;
                 break;
             }
@@ -242,47 +262,85 @@ public class DocumentExtractor {
         return text.substring(start);
     }
 
+    /* ===================== FINAL CHUNK ===================== */
+
+
     private DocumentChunk createChunk(
             String text,
             DocumentSection section,
             List<Integer> pages,
             String documentId,
-            String checksum
+            String checksum,
+            int chunkIndex,
+            int chunkTotal
     ) {
 
-        String sectionHash = section.getFullHeadingPath() == null
-                ? "nosection"
-                : String.valueOf(Math.abs(section.getFullHeadingPath().hashCode()));
-
         DocumentChunk chunk = new DocumentChunk();
-        chunk.setId( UUID.nameUUIDFromBytes((documentId + ":" + chunk.getChunkIndex()).getBytes()).toString());
+
+        chunk.setChunkIndex(chunkIndex);
+        chunk.setChunkTotal(chunkTotal);
+
+        chunk.setId(
+                UUID.nameUUIDFromBytes(
+                        (documentId + ":" + chunkIndex)
+                                .getBytes()
+                ).toString()
+        );
+
         chunk.setContent(text);
         chunk.setText(text);
         chunk.setSourceDocument(documentId);
 
         chunk.setSection(section.getHeadingText());
-        chunk.setStartPage(Collections.min(pages));
-        chunk.setEndPage(Collections.max(pages));
         chunk.setSectionPath(section.getFullHeadingPath());
 
-        Map<String, Object> metadata = chunk.getMetadata();
+        chunk.setStartPage(
+                pages.isEmpty() ? null :
+                        Collections.min(pages)
+        );
+        chunk.setEndPage(
+                pages.isEmpty() ? null :
+                        Collections.max(pages)
+        );
+
+        Map<String, Object> metadata =
+                chunk.getMetadata();
 
         metadata.put("document_id", documentId);
         metadata.put("checksum", checksum);
-        metadata.put("indexed_at", Instant.now().toString());
+        metadata.put("indexed_at",
+                Instant.now().toString());
+
+        metadata.put("chunk_index", chunkIndex);
+        metadata.put("chunk_total", chunkTotal);
+
+        metadata.put("start_page",
+                chunk.getStartPage());
+        metadata.put("end_page",
+                chunk.getEndPage());
         metadata.put("pages", pages);
-        metadata.put("section_path", section.getFullHeadingPath());
-
-
-//        metadata.put("chunk_type", "bookmark");
-//        metadata.put("bookmark_level", section.getLevel());
-//        metadata.put("pages", pages);
-//        metadata.put("source", documentId);
-//        metadata.put("section_path", section.getFullHeadingPath());
-
+        metadata.put("section_path",
+                section.getFullHeadingPath());
 
         return chunk;
     }
 
-    private record ChunkWithPages(String text, List<Integer> pages) {}
+    /* ===================== INTERNAL DTO ===================== */
+
+    private static class TempChunk {
+        final String text;
+        final DocumentSection section;
+        final List<Integer> pages;
+
+        TempChunk(
+                String text,
+                DocumentSection section,
+                List<Integer> pages
+        ) {
+            this.text = text;
+            this.section = section;
+            this.pages = pages;
+        }
+    }
+
 }

@@ -30,11 +30,11 @@ public class EmbeddingClient {
         if (text == null || text.isBlank()) {
             throw new IllegalArgumentException("Embedding text must not be null or empty");
         }
-        log.debug("Embedding text (length={} chars)", text.length());
+        log.info("Embedding text (length={} chars)", text.length());
 
         EmbeddingRequest request =
                 new EmbeddingRequest(List.of(text));
-        // Pending to configure a real embedding server (OpenAI / Azure / custom)
+        // Call FAST API
         EmbeddingResponse response =
                 restTemplate.postForObject(
                         endpoint + "/embed",

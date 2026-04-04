@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 
 import com.example.rag.config.RagIndexingProperties;
+import com.example.rag.vector.VectorStoreClient;
 
 @Component
 public class RagIndexingRunner {
@@ -18,6 +19,7 @@ public class RagIndexingRunner {
     private static final Logger log = LoggerFactory.getLogger(RagIndexingRunner.class);
 
     private final RagIndexingService indexingService;
+    private final VectorStoreClient vectorStoreClient;
     private final RagIndexingProperties props;
     private final AtomicBoolean started = new AtomicBoolean(false);
 
@@ -28,16 +30,27 @@ public class RagIndexingRunner {
 
     public RagIndexingRunner(
             RagIndexingService indexingService,
+            VectorStoreClient vectorStoreClient,
             RagIndexingProperties props
     ) {
         this.indexingService = indexingService;
+        this.vectorStoreClient = vectorStoreClient;
         this.props = props;
     }
 
+//    @EventListener(ApplicationReadyEvent.class)
+//    @Async("indexingExecutor")
+//    public void startIndexing() throws IOException {
+//        vectorStoreClient.ensureCollectionExists();
+//        indexingService.indexDocuments(props.getDataPath());
+//    }
 
     @Async("indexingExecutor")
     @EventListener(ApplicationReadyEvent.class)
-    public void startIndexingAsync() {
+    public void startIndexingAsync() throws IOException {
+
+        vectorStoreClient.ensureCollectionExists();
+        indexingService.indexDocuments(props.getDataPath());
 
         // Prevent double execution
         if (!started.compareAndSet(false, true)) {

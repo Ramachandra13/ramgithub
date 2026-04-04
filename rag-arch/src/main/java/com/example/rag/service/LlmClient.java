@@ -3,6 +3,7 @@ package com.example.rag.service;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Scanner;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -11,10 +12,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import com.example.rag.model.ChatCompletionRequest;
 import com.example.rag.model.ChatCompletionResponse;
 import com.example.rag.model.DocumentChunk;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Component
 public class LlmClient {
@@ -23,11 +26,12 @@ public class LlmClient {
             LoggerFactory.getLogger(LlmClient.class);
 
     private final RestTemplate restTemplate = new RestTemplate();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Value("${llm.service.url}")
     private String llmUrl;
 
-    @Value("${llm.model:gpt-4o-mini}")
+    @Value("${llm.model:llama3}")
     private String model;
 
     @Value("${llm.api-key:}")
@@ -123,5 +127,99 @@ public class LlmClient {
                 chunks.stream()
                         .map(c -> "- " + c.getText())
                         .collect(Collectors.joining("\n"));
+    }
+
+    public void streamAnswer(
+            String question,
+            List<DocumentChunk> context,
+            SseEmitter emitter
+    ) {
+
+        String systemPrompt = buildSystemPrompt();
+        String contextBlock = buildContextBlock(context);
+
+        Map<String, Object> body = Map.of(
+                "model", model,
+                "stream", true,
+                "messages", List.of(
+                        Map.of("role", "system", "content", systemPrompt),
+                        Map.of(
+                                "role", "user",
+                                "content", contextBlock + "\n\nQuestion:\n" + question
+                        )
+                )
+        );
+
+        restTemplate.execute(
+                llmUrl + "/v1/chat/completions",
+                HttpMethod.POST,
+
+                // REQUEST CALLBACK – write JSON body
+                request -> {
+                    request.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+                    objectMapper.writeValue(
+                            request.getBody(),
+                            body
+                    );
+                },
+
+                // RESPONSE CALLBACK – stream tokens
+                response -> {
+                    try (Scanner scanner = new Scanner(response.getBody())) {
+                        while (scanner.hasNextLine()) {
+                            String line = scanner.nextLine();
+                            String token = extractToken(line);
+
+                            if (!token.isEmpty()) {
+                                emitter.send(
+                                        SseEmitter.event()
+                                                .name("token")
+                                                .data(token)
+                                );
+                            }
+                        }
+                    }
+                    return null;
+                }
+        );
+    }
+
+    private HttpHeaders defaultHeaders() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        return headers;
+    }
+
+    private String extractToken(String line) {
+
+        // Ignore end-of-stream marker
+        if (line == null || line.isBlank() || line.contains("[DONE]")) {
+            return "";
+        }
+
+        // Ollama / OpenAI streams each line starting with "data:"
+        if (line.startsWith("data:")) {
+            line = line.substring("data:".length()).trim();
+        }
+
+        try {
+            // Parse minimal JSON manually (no heavy ObjectMapper in hot path)
+            int contentIndex = line.indexOf("\"content\":\"");
+            if (contentIndex == -1) {
+                return "";
+            }
+
+            int start = contentIndex + "\"content\":\"".length();
+            int end = line.indexOf("\"", start);
+
+            if (end > start) {
+                return line.substring(start, end);
+            }
+
+        } catch (Exception ignored) {
+            // Ignore malformed partial chunks
+        }
+
+        return "";
     }
 }

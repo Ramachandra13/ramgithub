@@ -14,15 +14,6 @@ public class TextChunker {
     private static final Logger log =
             LoggerFactory.getLogger(TextChunker.class);
 
-    /**
-     * Chunk text into DocumentChunk objects for RAG.
-     *
-     * @param documentId     unique document id
-     * @param sourceDocument filename / source
-     * @param text           full document text
-     * @param chunkSize      max characters per chunk
-     * @param overlap        overlapping characters
-     */
     public List<DocumentChunk> chunk(
             String documentId,
             String sourceDocument,
@@ -67,7 +58,6 @@ public class TextChunker {
             chunkTexts.add(lastChunk);
         }
 
-
         int totalChunks = chunkTexts.size();
         List<DocumentChunk> result = new ArrayList<>(totalChunks);
 
@@ -76,36 +66,33 @@ public class TextChunker {
 
             DocumentChunk chunk = new DocumentChunk();
 
-
-// -------- core identity --------
+            // Identity
             chunk.setId(UUID.randomUUID().toString());
-            chunk.setSource(sourceDocument);
             chunk.setSourceDocument(sourceDocument);
 
-            // -------- content --------
-            chunk.setContent(chunkText);   // used for embeddings
-            chunk.setText(chunkText);      // UI / debug
+            // Content
+            chunk.setContent(chunkText);
+            chunk.setText(chunkText);
 
-            // -------- chunk info --------
+            // Chunk info
             chunk.setChunkIndex(i);
             chunk.setChunkTotal(totalChunks);
 
-            // -------- optional defaults --------
+            // Semantic info (basic fallback)
             chunk.setSection("body");
-            chunk.setStartPage(-1);
-            chunk.setEndPage(-1);
+            chunk.setStartPage(null);
+            chunk.setEndPage(null);
 
-            // -------- IMPORTANT: metadata --------
+            // METADATA (THIS WAS MISSING)
             Map<String, Object> metadata = chunk.getMetadata();
-
             metadata.put("document_id", documentId);
-            metadata.put("source", sourceDocument);
+            metadata.put("start_page", null);
+            metadata.put("end_page", null);
+            metadata.put("section_path", "body");
             metadata.put("chunk_index", i);
             metadata.put("chunk_total", totalChunks);
-            metadata.put("section", "body");
 
             result.add(chunk);
-
         }
 
         log.info(

@@ -14,7 +14,14 @@ public class ChatRequest {
         this.messages = messages;
     }
 
+    /**
+     * Returns the latest user question in the conversation.
+     */
     public String latestUserQuestion() {
+        if (messages == null || messages.isEmpty()) {
+            throw new IllegalArgumentException("No messages provided");
+        }
+
         return messages.stream()
                 .filter(m -> "user".equalsIgnoreCase(m.role()))
                 .reduce((first, second) -> second)
@@ -23,5 +30,6 @@ public class ChatRequest {
                         new IllegalArgumentException("No user message found"));
     }
 
+    /** Chat-style message */
     public record Message(String role, String content) {}
 }

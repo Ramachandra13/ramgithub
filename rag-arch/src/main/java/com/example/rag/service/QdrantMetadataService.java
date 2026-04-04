@@ -37,9 +37,8 @@ public class QdrantMetadataService {
     }
 
     public void deleteDocumentVectors(String documentId) {
-        vectorStore.deleteByFilter(
-                Map.of("document_id", documentId)
-        );
+        vectorStore.deleteByFilter(documentId);
     }
+
 
 }

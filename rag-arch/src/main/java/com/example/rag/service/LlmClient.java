@@ -168,6 +168,12 @@ public class LlmClient {
                     try (Scanner scanner = new Scanner(response.getBody())) {
                         while (scanner.hasNextLine()) {
                             String line = scanner.nextLine();
+
+                            // END OF STREAM — MUST BREAK
+                            if (line.contains("[DONE]")) {
+                                break;
+                            }
+
                             String token = extractToken(line);
 
                             if (!token.isEmpty()) {
